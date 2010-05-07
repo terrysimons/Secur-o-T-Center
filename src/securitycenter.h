@@ -14,6 +14,7 @@ public:
 
 private:
 	Ui::SecurityCenterClass ui;
+	void *registrationHandle;
 };
 
 #endif // SECURITYCENTER_H

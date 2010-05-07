@@ -1,4 +1,5 @@
 #include "securitycenter.h"
+#include "securitycenterwindows.h"
 #include <QtGui/QApplication>
 
 int main(int argc, char *argv[])
