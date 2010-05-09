@@ -186,6 +186,10 @@
 				>
 			</File>
 			<File
+				RelativePath=".\productinfo.h"
+				>
+			</File>
+			<File
 				RelativePath=".\windowsfw.h"
 				>
 			</File>

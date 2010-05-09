@@ -7,8 +7,7 @@ extern BOOL windowsFirewallRealtimeState;
 HRESULT WindowsFirewallInitialize(OUT INetFwProfile** fwProfile);
 void WindowsFirewallCleanup(IN INetFwProfile* fwProfile);
 HRESULT WindowsFirewallIsOn(IN INetFwProfile* fwProfile, OUT BOOL* fwOn);
-
 HRESULT GetWindowsFirewallState(BOOL *fwOn);
-unsigned __stdcall PollWindowsFirewallState(void* arg);
+HRESULT RegisterMSFirewallChanges();
 
 #endif __WINDOWS_FW_H__
