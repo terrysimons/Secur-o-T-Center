@@ -4,8 +4,12 @@ using namespace std;
 #include <comdef.h>
 #include <Wbemidl.h>
 #include <Wscapi.h>
+#include <netfw.h>
+#include <process.h>
+#include "windowsfw.h"
+#include "eventdetection.h"
 
-bool done = false;
+bool done               = false;
 
 # pragma comment(lib, "wbemuuid.lib")
 
@@ -114,45 +118,6 @@ string providerGuess;
 
 HRESULT DisplaySecurityCenter2Products(char *query) {
     HRESULT hres;
-
-    // Step 1: --------------------------------------------------
-    // Initialize COM. ------------------------------------------
-
-    hres =  CoInitializeEx(0, COINIT_MULTITHREADED); 
-    if (FAILED(hres))
-    {
-        cout << "Failed to initialize COM library. Error code = 0x" 
-            << hex << hres << endl;
-        return hres;                  // Program has failed.
-    }
-
-    // Step 2: --------------------------------------------------
-    // Set general COM security levels --------------------------
-    // Note: If you are using Windows 2000, you need to specify -
-    // the default authentication credentials for a user by using
-    // a SOLE_AUTHENTICATION_LIST structure in the pAuthList ----
-    // parameter of CoInitializeSecurity ------------------------
-
-    hres =  CoInitializeSecurity(
-        NULL, 
-        -1,                          // COM authentication
-        NULL,                        // Authentication services
-        NULL,                        // Reserved
-        RPC_C_AUTHN_LEVEL_DEFAULT,   // Default authentication 
-        RPC_C_IMP_LEVEL_IMPERSONATE, // Default Impersonation  
-        NULL,                        // Authentication info
-        EOAC_NONE,                   // Additional capabilities 
-        NULL                         // Reserved
-        );
-
-                      
-    if (FAILED(hres))
-    {
-        cout << "Failed to initialize security. Error code = 0x" 
-            << hex << hres << endl;
-        CoUninitialize();
-        return hres;                    // Program has failed.
-    }
     
     // Step 3: ---------------------------------------------------
     // Obtain the initial locator to WMI -------------------------
@@ -170,7 +135,6 @@ HRESULT DisplaySecurityCenter2Products(char *query) {
         cout << "Failed to create IWbemLocator object."
             << " Err code = 0x"
             << hex << hres << endl;
-        CoUninitialize();
         return hres;                 // Program has failed.
     }
 
@@ -198,7 +162,6 @@ HRESULT DisplaySecurityCenter2Products(char *query) {
         cout << "Could not connect to ROOT\\SECURITYCENTER2. Error code = 0x" 
              << hex << hres << endl;
         pLoc->Release();     
-        CoUninitialize();
         return hres;                // Program has failed.
     }
 
@@ -225,7 +188,6 @@ HRESULT DisplaySecurityCenter2Products(char *query) {
             << hex << hres << endl;
         pSvc->Release();
         pLoc->Release();     
-        CoUninitialize();
         return 1;               // Program has failed.
     }
 
@@ -246,7 +208,6 @@ HRESULT DisplaySecurityCenter2Products(char *query) {
             << hex << hres << endl;
         pSvc->Release();
         pLoc->Release();
-        CoUninitialize();
         return hres;               // Program has failed.
     }
 
@@ -307,52 +268,12 @@ HRESULT DisplaySecurityCenter2Products(char *query) {
     pSvc->Release();
     pLoc->Release();
     pEnumerator->Release();
-    CoUninitialize();
 
 	return S_OK;
 }
 
 HRESULT DisplaySecurityCenterProducts(char *query) {
     HRESULT hres;
-
-    // Step 1: --------------------------------------------------
-    // Initialize COM. ------------------------------------------
-
-    hres =  CoInitializeEx(0, COINIT_MULTITHREADED); 
-    if (FAILED(hres))
-    {
-        cout << "Failed to initialize COM library. Error code = 0x" 
-            << hex << hres << endl;
-        return hres;                  // Program has failed.
-    }
-
-    // Step 2: --------------------------------------------------
-    // Set general COM security levels --------------------------
-    // Note: If you are using Windows 2000, you need to specify -
-    // the default authentication credentials for a user by using
-    // a SOLE_AUTHENTICATION_LIST structure in the pAuthList ----
-    // parameter of CoInitializeSecurity ------------------------
-
-    hres =  CoInitializeSecurity(
-        NULL, 
-        -1,                          // COM authentication
-        NULL,                        // Authentication services
-        NULL,                        // Reserved
-        RPC_C_AUTHN_LEVEL_DEFAULT,   // Default authentication 
-        RPC_C_IMP_LEVEL_IMPERSONATE, // Default Impersonation  
-        NULL,                        // Authentication info
-        EOAC_NONE,                   // Additional capabilities 
-        NULL                         // Reserved
-        );
-
-                      
-    if (FAILED(hres))
-    {
-        cout << "Failed to initialize security. Error code = 0x" 
-            << hex << hres << endl;
-        CoUninitialize();
-        return hres;                    // Program has failed.
-    }
     
     // Step 3: ---------------------------------------------------
     // Obtain the initial locator to WMI -------------------------
@@ -370,7 +291,6 @@ HRESULT DisplaySecurityCenterProducts(char *query) {
         cout << "Failed to create IWbemLocator object."
             << " Err code = 0x"
             << hex << hres << endl;
-        CoUninitialize();
         return hres;                 // Program has failed.
     }
 
@@ -398,7 +318,6 @@ HRESULT DisplaySecurityCenterProducts(char *query) {
         cout << "Could not connect to ROOT\\SECURITYCENTER. Error code = 0x" 
              << hex << hres << endl;
         pLoc->Release();     
-        CoUninitialize();
         return hres;                // Program has failed.
     }
 
@@ -425,7 +344,6 @@ HRESULT DisplaySecurityCenterProducts(char *query) {
             << hex << hres << endl;
         pSvc->Release();
         pLoc->Release();     
-        CoUninitialize();
         return 1;               // Program has failed.
     }
 
@@ -446,7 +364,6 @@ HRESULT DisplaySecurityCenterProducts(char *query) {
             << hex << hres << endl;
         pSvc->Release();
         pLoc->Release();
-        CoUninitialize();
         return hres;               // Program has failed.
     }
 
@@ -529,10 +446,41 @@ HRESULT DisplaySecurityCenterProducts(char *query) {
     pSvc->Release();
     pLoc->Release();
     pEnumerator->Release();
-    CoUninitialize();
 
 	return S_OK;
 }
+
+HRESULT DisplayOtherFirewallProducts() {
+    HRESULT hr               = S_OK;
+    HRESULT comInit          = E_FAIL;
+	INetFwProfile* fwProfile = NULL;
+	BOOL fwOn                = FALSE;
+	HANDLE timer             = NULL;
+
+	GetWindowsFirewallState(&fwOn);
+
+	// This helps keep us in sync when polling state.
+	windowsFirewallRealtimeState = fwOn;
+
+	printf("Other Firewall Products: \n\n");
+
+	printf("Product Name: Windows Firewall\n");
+	printf("Realtime Status: %s\n\n", (fwOn == TRUE)? "Enabled" : "Disabled");
+
+	// If everything was peachy, set up a timer to periodically check this:
+	timer = CreateWaitableTimer(0, false, 0);
+	LARGE_INTEGER li;
+	const int unitsPerSecond = 10 * 1000 * 1000;
+
+	li.QuadPart=-(5*unitsPerSecond);
+
+	SetWaitableTimer(timer, &li, 5000, 0, 0, false);
+
+	_beginthreadex(0, 0, PollWindowsFirewallState, (void *)timer, 0, 0);
+
+	return hr;
+}
+
 
 HRESULT DisplayAntiVirusProducts() {
 	HRESULT result = S_OK;
@@ -546,7 +494,7 @@ HRESULT DisplayAntiVirusProducts() {
 	// Get products for ROOT\\SECURITYCENTER namespace
 	result = DisplaySecurityCenterProducts(query);
 
-	printf("---------------------------------------\n\n");
+	printf("----- End Query: %s -----\n\n", query);
 
 	// TODO: Any that don't show up?
 
@@ -565,7 +513,7 @@ HRESULT DisplayAntiSpywareProducts() {
 	// Get products for ROOT\\SECURITYCENTER namespace
 	result = DisplaySecurityCenterProducts(query);
 
-	printf("---------------------------------------\n\n");
+	printf("----- End Query: %s -----\n\n", query);
 
 	// TODO: Windows Defender?
 
@@ -584,22 +532,14 @@ HRESULT DisplayFirewallProducts() {
 	// Get products for ROOT\\SECURITYCENTER namespace
 	result = DisplaySecurityCenterProducts(query);
 
-	printf("---------------------------------------\n\n");
+	printf("----- End Query: %s -----\n\n", query);
 
 	// TODO: Windows Firewall?
+	result = DisplayOtherFirewallProducts();
 
 	return result;
 }
 
-void WINAPI SecurityCenterChangeOccurred(void *param) {
-	HRESULT result = S_OK;
-
-	printf("\nSecurity/Action Center Change Posted!\n");
-
-	result = DisplayAntiVirusProducts();
-	result = DisplayAntiSpywareProducts();
-	result = DisplayFirewallProducts();
-}
 
 BOOL WINAPI ConsoleHandler(DWORD CEvent) {
 
@@ -621,27 +561,76 @@ BOOL WINAPI ConsoleHandler(DWORD CEvent) {
 
 int main(int argc, char **argv)
 {
-	HRESULT result = S_OK;
+	HRESULT hres = S_OK;
 	HANDLE callbackRegistration = NULL;
+
+    // Step 1: --------------------------------------------------
+    // Initialize COM. ------------------------------------------
+
+    hres =  CoInitializeEx(0, COINIT_MULTITHREADED); 
+    if (FAILED(hres))
+    {
+        cout << "Failed to initialize COM library. Error code = 0x" 
+            << hex << hres << endl;
+        return hres;                  // Program has failed.
+    }
+
+    // Step 2: --------------------------------------------------
+    // Set general COM security levels --------------------------
+    // Note: If you are using Windows 2000, you need to specify -
+    // the default authentication credentials for a user by using
+    // a SOLE_AUTHENTICATION_LIST structure in the pAuthList ----
+    // parameter of CoInitializeSecurity ------------------------
+
+    hres =  CoInitializeSecurity(
+        NULL, 
+        -1,                          // COM authentication
+        NULL,                        // Authentication services
+        NULL,                        // Reserved
+        RPC_C_AUTHN_LEVEL_DEFAULT,   // Default authentication 
+        RPC_C_IMP_LEVEL_IMPERSONATE, // Default Impersonation  
+        NULL,                        // Authentication info
+        EOAC_NONE,                   // Additional capabilities 
+        NULL                         // Reserved
+        );
+
+                      
+    if (FAILED(hres))
+    {
+        cout << "Failed to initialize security. Error code = 0x" 
+            << hex << hres << endl;
+        CoUninitialize();
+        return hres;                    // Program has failed.
+    }
 
 	// So we can handle control-c to break.
 	SetConsoleCtrlHandler((PHANDLER_ROUTINE)ConsoleHandler, TRUE);
 
-	DisplayAntiVirusProducts();
-	DisplayAntiSpywareProducts();
-	DisplayFirewallProducts();
-
-	result = WscRegisterForChanges(
+	// Final param gets passed to ProductStateChangeOccurred - It's specifc to our code.
+	// See eventdetection.h
+	hres = WscRegisterForChanges(
 		NULL, 
 		&callbackRegistration, 
-		(LPTHREAD_START_ROUTINE)SecurityCenterChangeOccurred, 
-		NULL);
+		(LPTHREAD_START_ROUTINE)ProductStateChangeOccurred, 
+		(PVOID)EVENT_TYPE_WSC);
 
 	while(!done) {
+
+		if(productCheckNeeded) {
+			hres = DisplayAntiVirusProducts();
+			hres = DisplayAntiSpywareProducts();
+			hres = DisplayFirewallProducts();
+
+			productCheckNeeded = false;;
+		}
+
 		Sleep(250);
 	}
 
 	WscUnRegisterChanges(callbackRegistration);
+
+    CoUninitialize();
+
 
     return 0;   // Program successfully completed.	
 }
