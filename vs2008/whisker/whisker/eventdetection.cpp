@@ -579,7 +579,7 @@ HRESULT QuerySecurityCenter2Products(char *query, list<struct productInfo> *prod
 		int byte1 = (vtProp.intVal & 0x000000FF);
 
 		
-		wcout << "Product State: " << vtProp.intVal << endl;
+		wcout << "Product State: " << dec << vtProp.intVal << endl;
 		wcout << "Product State (hex): " << hex << vtProp.intVal << endl;
 		wcout << "Byte 4: " << hex << byte4 << endl;
 		wcout << "Byte 3: " << hex << byte3 << endl;
@@ -800,8 +800,7 @@ HRESULT QuerySecurityCenterProducts(char *query, list<struct productInfo> *produ
 		int byte2 = (vtProp.intVal & 0x0000FF00) >> 8;
 		int byte1 = (vtProp.intVal & 0x000000FF);
 
-		/*
-		wcout << "Product State: " << vtProp.intVal << endl;
+		wcout << "Product State: " << dec << vtProp.intVal << endl;
 		wcout << "Product State (hex): " << hex << vtProp.intVal << endl;
 		wcout << "Byte 4: " << hex << byte4 << endl;
 		wcout << "Byte 3: " << hex << byte3 << endl;
@@ -811,7 +810,6 @@ HRESULT QuerySecurityCenterProducts(char *query, list<struct productInfo> *produ
 		wcout << "Realtime Guess: " << scannerActiveGuess(vtProp.intVal).c_str() << endl;
 		wcout << "DAT File Guess: " << datFileGuess(vtProp.intVal).c_str() << endl;
 		wcout << endl;
-		*/
 
 		product.productState = vtProp.intVal;
 
