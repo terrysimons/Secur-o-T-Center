@@ -1,16 +1,17 @@
 #define _WIN32_DCOM
 #include "eventdetection.h"
 #include <iostream>
-using namespace std;
 #include <comdef.h>
 #include <Wbemidl.h>
 #include <netfw.h>
 #include <windows.h>
 #include <Wscapi.h>
 #include <stdio.h>
-#include <queue>
+#include <list>
 #include "productinfo.h"
 #include "windowsfw.h"
+
+using namespace std;
 
 # pragma comment(lib, "wbemuuid.lib")
 
@@ -30,15 +31,30 @@ using namespace std;
 #define DAT_FILE_OUT_OF_DATE 0x10
 #define DAT_FILE_NOTIFIED_USER 0x01
 
+// TODO: Make registration thread-specific instead of global.
+
+static struct eventMap {
+	bool av;
+	bool as;
+	bool fw;
+	bool filter;
+	void (*EventCallback)(const list<struct productInfo> &changedProducts);
+}registeredEvents;
+
+// This is used by the caller to determine when a refresh is necessary.
+bool productCheckNeeded = true;
+
+// These should only be used internally by eventdetection.cpp
+static bool registeredForEvents    = false;
+static HANDLE callbackRegistration = NULL;
+
 string datFileGuess(int guess) {
 	string guessString;
 
-	if(guess == DAT_FILE_UP_TO_DATE) {
-		guessString += "DAT File Current ";
-	}
-
 	if(guess & DAT_FILE_OUT_OF_DATE) {
 		guessString += "DAT File Out of Date ";
+	} else {
+		guessString += "DAT File Current ";
 	}
 
 	if(guess & DAT_FILE_NOTIFIED_USER) {
@@ -117,26 +133,10 @@ string providerGuess;
 	return providerGuess;
 }
 
-// TODO: Make registration thread-specific instead of global.
-
-static struct eventMap {
-	bool av;
-	bool as;
-	bool fw;
-	bool filter;
-	LPTHREAD_START_ROUTINE EventCallback;
-}registeredEvents;
-
-// This is used by the caller to determine when a refresh is necessary.
-bool productCheckNeeded = true;
-
-// These should only be used internally by eventdetection.cpp
-static bool registeredForEvents    = false;
-static HANDLE callbackRegistration = NULL;
-
 void WINAPI ProductStateChangeOccurred(void *param) {
 	WISKER_EVENT_DETECTION_TYPE eventType = (WISKER_EVENT_DETECTION_TYPE)(int)param;
 	char eventTypeName[32]                = {0};
+	list <struct productInfo> productList;
 
 	switch(eventType) {
 		case EVENT_TYPE_WSC:
@@ -154,6 +154,11 @@ void WINAPI ProductStateChangeOccurred(void *param) {
 
 	printf("%s triggered a product change event.\n", eventTypeName);
 
+	// Detect products here.
+	DetectAntiVirusProducts(&productList);
+	DetectAntiSpywareProducts(&productList);
+	DetectFirewallProducts(&productList);
+
 	// If we're supposed to filter events, then queue the product changes
 	// for post-processing.
 	if(registeredEvents.filter) {
@@ -161,7 +166,7 @@ void WINAPI ProductStateChangeOccurred(void *param) {
 	} else {
 		// Otherwise, just deliver them.
 		if(registeredEvents.EventCallback != NULL) {
-			registeredEvents.EventCallback((LPVOID)eventType);
+			registeredEvents.EventCallback(productList);
 		}
 	}
 
@@ -191,7 +196,7 @@ HRESULT UnregisterProductStateChanges() {
 // if product state is different, issue appropriate event(s). (tbd based on state data).
 // mark product as still present
 // at the end of all queued events iterate master list and check for non-present items... this means the product(s) in question were uninstalled.
-HRESULT RegisterProductStateChanges(LPTHREAD_START_ROUTINE productStateChangeCallback, int registrationType) {
+HRESULT RegisterProductStateChanges(void (*productStateChangeCallback)(const list<struct productInfo> &changedProducts), int registrationType) {
 	HRESULT hres = S_OK;
 
 	// Register for WSC Notifications
@@ -230,7 +235,7 @@ HRESULT RegisterProductStateChanges(LPTHREAD_START_ROUTINE productStateChangeCal
 	return S_OK;
 }
 
-HRESULT QuerySecurityCenter2Products(char *query) {
+HRESULT QuerySecurityCenter2Products(char *query, list<struct productInfo> *productList, WHISKER_PRODUCT_TYPE productType) {
     HRESULT hres;
     
     // Step 3: ---------------------------------------------------
@@ -382,6 +387,18 @@ HRESULT QuerySecurityCenter2Products(char *query) {
 
 		product.productState = vtProp.intVal;
 
+		if(byte2 & REAL_TIME_SCAN_ENABLED) {
+			product.productEnabled = true;
+		}
+
+		if(!(byte1 & DAT_FILE_OUT_OF_DATE)) {
+			product.productUptoDate = true;
+		}
+
+		product.productType = productType;
+
+		productList->push_back(product);
+
 		VariantClear(&vtProp);
 
         pclsObj->Release();
@@ -397,7 +414,7 @@ HRESULT QuerySecurityCenter2Products(char *query) {
 	return S_OK;
 }
 
-HRESULT QuerySecurityCenterProducts(char *query) {
+HRESULT QuerySecurityCenterProducts(char *query, list<struct productInfo> *productList, WHISKER_PRODUCT_TYPE productType) {
     HRESULT hres;
     
     // Step 3: ---------------------------------------------------
@@ -590,6 +607,10 @@ HRESULT QuerySecurityCenterProducts(char *query) {
 
 		product.productState = vtProp.intVal;
 
+		product.productType = productType;
+
+		productList->push_back(product);
+
 		VariantClear(&vtProp);
 
         pclsObj->Release();
@@ -605,81 +626,87 @@ HRESULT QuerySecurityCenterProducts(char *query) {
 	return S_OK;
 }
 
-HRESULT QueryOtherFirewallProducts() {
-    HRESULT hr               = S_OK;
+HRESULT QueryOtherFirewallProducts(list<struct productInfo> *productList) {
+    HRESULT hres             = S_OK;
     HRESULT comInit          = E_FAIL;
 	INetFwProfile* fwProfile = NULL;
-	BOOL fwOn                = FALSE;
+	BOOL fwState             = FALSE;
+	struct productInfo product;
 
-	GetWindowsFirewallState(&fwOn);
+	memset(&product, 0x0, sizeof(struct productInfo));
+
+	hres = GetWindowsFirewallState(&fwState);
 
 	// This helps keep us in sync when polling state.
-	windowsFirewallRealtimeState = fwOn;
+	windowsFirewallRealtimeState = fwState;
+
+	product.companyName = L"Microsoft";
+	product.displayName = L"Windows Firewall";
+	product.productEnabled = (fwState != 0);
+	product.productType = PRODUCT_TYPE_FW;
 
 	printf("Other Firewall Products: \n\n");
 
 	printf("Product Name: Windows Firewall\n");
-	printf("Realtime Status: %s\n\n", (fwOn == TRUE)? "Enabled" : "Disabled");
+	printf("Realtime Status: %s\n\n", (fwState == TRUE)? "Enabled" : "Disabled");
 
-	// If everything was peachy, set up a timer to periodically check this:
+	productList->push_back(product);
 
-	return hr;
+	return hres;
 }
 
-HRESULT DetectAntiVirusProducts() {
+HRESULT DetectAntiVirusProducts(list<struct productInfo> *avList) {
 	HRESULT result = S_OK;
 	char *query = "SELECT * from AntiVirusProduct";
 
 	printf("----- Query: %s -----\n", query);
 
 	// Get products for ROOT\\SECURITYCENTER2 namespace
-	result = QuerySecurityCenter2Products(query);
+	result = QuerySecurityCenter2Products(query, avList, PRODUCT_TYPE_AV);
 
 	// Get products for ROOT\\SECURITYCENTER namespace
-	result = QuerySecurityCenterProducts(query);
+	result = QuerySecurityCenterProducts(query, avList, PRODUCT_TYPE_AV);
 
 	printf("----- End Query: %s -----\n\n", query);
 
 	// TODO: Any that don't show up?
-
 	return result;
 }
 
-HRESULT DetectAntiSpywareProducts() {
+ HRESULT DetectAntiSpywareProducts(list<struct productInfo> *asList) {
 	HRESULT result = S_OK;
 	char *query = "SELECT * from AntiSpywareProduct";
 
 	printf("----- Query: %s -----\n", query);
 
 	// Get products for ROOT\\SECURITYCENTER2 namespace
-	result = QuerySecurityCenter2Products(query);
+	result = QuerySecurityCenter2Products(query, asList, PRODUCT_TYPE_AS);
 
 	// Get products for ROOT\\SECURITYCENTER namespace
-	result = QuerySecurityCenterProducts(query);
+	result = QuerySecurityCenterProducts(query, asList, PRODUCT_TYPE_AS);
 
 	printf("----- End Query: %s -----\n\n", query);
 
 	// TODO: Windows Defender?
-
 	return result;
 }
 
-HRESULT DetectFirewallProducts() {
+HRESULT DetectFirewallProducts(list<struct productInfo> *fwList) {
 	HRESULT result = S_OK;
 	char *query = "SELECT * from FirewallProduct";
 
 	printf("----- Query: %s -----\n", query);
 
 	// Get products for ROOT\\SECURITYCENTER2 namespace
-	result = QuerySecurityCenter2Products(query);
+	result = QuerySecurityCenter2Products(query, fwList, PRODUCT_TYPE_FW);
 
 	// Get products for ROOT\\SECURITYCENTER namespace
-	result = QuerySecurityCenterProducts(query);
+	result = QuerySecurityCenterProducts(query, fwList, PRODUCT_TYPE_FW);
 
 	printf("----- End Query: %s -----\n\n", query);
 
 	// TODO: Windows Firewall?
-	result = QueryOtherFirewallProducts();
+	result = QueryOtherFirewallProducts(fwList);
 
 	return result;
 }

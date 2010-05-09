@@ -1,10 +1,16 @@
 #include <iostream>
+#include <list>
 #include <process.h>
 #include "windowsfw.h"
 #include "eventdetection.h"
 #include "productinfo.h"
 
 bool done               = false;
+using namespace std;
+
+list <struct productInfo> avList;
+list <struct productInfo> asList;
+list <struct productInfo> fwList;
 
 BOOL WINAPI ConsoleHandler(DWORD CEvent) {
 
@@ -24,7 +30,7 @@ BOOL WINAPI ConsoleHandler(DWORD CEvent) {
 	return TRUE;
 }
 
-void WINAPI ProductStateChangeWithFilter(void *param) {
+void EventNotificationCallback(const list<struct productInfo> &changedProducts) {
 	printf("Main!\n");
 }
 
@@ -73,23 +79,17 @@ int main(int argc, char **argv) {
 	// So we can handle control-c to break.
 	SetConsoleCtrlHandler((PHANDLER_ROUTINE)ConsoleHandler, TRUE);
 
-
-
 	// Register for all product event types, but filter events.
 	// This will ensure that we only get notified of hard changes.
 	// It prevents blipping that can occur during installation/removal of products.
-	RegisterProductStateChanges((LPTHREAD_START_ROUTINE)ProductStateChangeWithFilter, 
-								EVENT_REGISTRATION_TYPE_ALL);
+	RegisterProductStateChanges(&EventNotificationCallback, 
+								EVENT_REGISTRATION_TYPE_ALL|EVENT_REGISTRATION_TYPE_FILTER);
+
+	DetectAntiVirusProducts(&avList);
+	DetectAntiSpywareProducts(&asList);
+	DetectFirewallProducts(&fwList);
 
 	while(!done) {
-
-		if(productCheckNeeded) {
-			hres = DetectAntiVirusProducts();
-			hres = DetectAntiSpywareProducts();
-			hres = DetectFirewallProducts();
-
-			productCheckNeeded = false;
-		}
 
 		Sleep(250);
 	}

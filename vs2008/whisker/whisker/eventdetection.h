@@ -2,6 +2,9 @@
 #define __DETECTION_EVENT_H__
 
 #include <windows.h>
+#include <list>
+
+using namespace std;
 
 extern bool productCheckNeeded;
 
@@ -27,15 +30,15 @@ typedef enum WISKER_EVENT_DETECTION_TYPE {
 	EVENT_TYPE_MSDEFENDER
 }WISKER_EVENT_DETECTION_TYPE;
 
-HRESULT RegisterProductStateChanges(LPTHREAD_START_ROUTINE productStateChangeCallback, 
+HRESULT RegisterProductStateChanges(void (*productStateChangeCallback)(const list<struct productInfo> &), 
 									int registrationType);
 
 void WINAPI ProductStateChangeOccurred(void *param);
 
 HRESULT UnregisterProductStateChanges();
 
-HRESULT DetectAntiVirusProducts();
-HRESULT DetectAntiSpywareProducts();
-HRESULT DetectFirewallProducts();
+HRESULT DetectAntiVirusProducts(list<struct productInfo> *avList);
+HRESULT DetectAntiSpywareProducts(list<struct productInfo> *asList);
+HRESULT DetectFirewallProducts(list<struct productInfo> *fwList);
 
 #endif // __DETECTION_EVENT_H__
