@@ -168,7 +168,7 @@ unsigned __stdcall PollWindowsFirewallState(void* arg) {
 HRESULT RegisterMSFirewallChanges() {
 	HANDLE timer = NULL;
 
-	timer = CreateWaitableTimer(0, false, 0);
+	/*timer = CreateWaitableTimer(0, false, 0);
 	LARGE_INTEGER li;
 	const int unitsPerSecond = 10 * 1000 * 1000;
 
@@ -176,7 +176,7 @@ HRESULT RegisterMSFirewallChanges() {
 
 	SetWaitableTimer(timer, &li, 5000, 0, 0, false);
 
-	_beginthreadex(0, 0, PollWindowsFirewallState, (void *)timer, 0, 0);
+	_beginthreadex(0, 0, PollWindowsFirewallState, (void *)timer, 0, 0);*/
 
 	return S_OK;
 }

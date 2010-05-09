@@ -13,130 +13,117 @@
 
 using namespace std;
 
-# pragma comment(lib, "wbemuuid.lib")
+#pragma comment(lib, "wbemuuid.lib")
 
-#define PRODUCT_STATE_BYTE4 0xFF000000
-#define PRODUCT_STATE_BYTE3 0x00FF0000
-#define PRODUCT_STATE_BYTE2 0x0000FF00
-#define PRODUCT_STATE_BYTE1 0x000000FF
 
-#define PRODUCT_CODE_SECURITY_PROVIDER 0x00FF
+/*#define PRODUCT_CODE_SECURITY_PROVIDER 0x00FF
 #define PRODUCT_CODE_SCANNER_SETTINGS 0x0000FF
-#define PRODUCT_CODE_DAT_FILE_UPDATED 0x000000FF
+#define PRODUCT_CODE_DAT_FILE_UPDATED 0x000000FF*/
 
-#define REAL_TIME_SCAN_ENABLED 0x10
-#define REAL_TIME_SCAN_UNKNOWN 0x01
-
-#define DAT_FILE_UP_TO_DATE 0x00
-#define DAT_FILE_OUT_OF_DATE 0x10
-#define DAT_FILE_NOTIFIED_USER 0x01
+#define REAL_TIME_PROTECTION_ENABLED 0x00001000
+#define DAT_FILE_OUT_OF_DATE 0x00000010
+#define DAT_FILE_NOTIFIED_USER 0x00000001
 
 // TODO: Make registration thread-specific instead of global.
 
-static struct eventMap {
+static struct eventNotificationContext {
 	bool av;
 	bool as;
 	bool fw;
-	bool filter;
-	void (*EventCallback)(const list<struct productInfo> &changedProducts);
-}registeredEvents;
+	bool processedEvents;
+	bool rawEvents;
 
-// This is used by the caller to determine when a refresh is necessary.
-bool productCheckNeeded = true;
+	list <struct productInfo> avList;
+	list <struct productInfo> asList;
+	list <struct productInfo> fwList;
+
+	void (*EventCallback)(list<struct productChangedEvent> &changedProducts);
+}eventContext;
+
+// This is used internally to keep track of when the event-based
+// lists need updating.  We only need to update when an event occurs
+static bool updateEventQueue = true;
 
 // These should only be used internally by eventdetection.cpp
 static bool registeredForEvents    = false;
 static HANDLE callbackRegistration = NULL;
 
-string datFileGuess(int guess) {
+string datFileGuess(int productState) {
 	string guessString;
 
-	if(guess & DAT_FILE_OUT_OF_DATE) {
+	if(productState & DAT_FILE_OUT_OF_DATE) {
 		guessString += "DAT File Out of Date ";
 	} else {
-		guessString += "DAT File Current ";
+		guessString += "DAT File Up to Date ";
 	}
 
-	if(guess & DAT_FILE_NOTIFIED_USER) {
+	if(productState & DAT_FILE_NOTIFIED_USER) {
 		guessString += "DAT File Notified User ";
 	}
 
-	if(guess > 0x11) {
-		printf("Unexpected value in dat file state guess.\n");
-	}
-
 	return guessString;
 }
 
-string scannerActiveGuess(int guess) {
+string scannerActiveGuess(int productState) {
 	string guessString;
 
-	if(guess & REAL_TIME_SCAN_ENABLED) {
-		guessString += "Realtime Scanning Enabled ";
+	if(productState & REAL_TIME_PROTECTION_ENABLED) {
+		guessString += "Enabled ";
 	}
 
-	if(!(guess & REAL_TIME_SCAN_ENABLED)) {
-		guessString += "Realtime Scanning Disabled ";
-	}
-
-	// If the real time scan byte contains anything other
-	// than 0x10 or 0x00, then we have unknown bits set.
-	if((guess != REAL_TIME_SCAN_ENABLED) && 
-		(guess != 0)) {
-		guessString += "Realtime Scanning Unknown Parameters ";
+	if(!(productState & REAL_TIME_PROTECTION_ENABLED)) {
+		guessString += "Disabled ";
 	}
 
 	return guessString;
 }
 
-string securityProviderGuess(int provider) {
+string securityProviderGuess(int productState) {
 string providerGuess;
 
-	if(provider & WSC_SECURITY_PROVIDER_FIREWALL) {
+	if((productState >> 16) & WSC_SECURITY_PROVIDER_FIREWALL) {
 		providerGuess += "Firewall ";
 	}
 
-	if(provider & WSC_SECURITY_PROVIDER_AUTOUPDATE_SETTINGS) {
+	if((productState >> 16)& WSC_SECURITY_PROVIDER_AUTOUPDATE_SETTINGS) {
 		providerGuess += "AutoUpdate ";
 	}
 
-	if(provider & WSC_SECURITY_PROVIDER_ANTIVIRUS) {
+	if((productState >> 16) & WSC_SECURITY_PROVIDER_ANTIVIRUS) {
 		providerGuess += "AntiVirus ";
 	}
 
-	if(provider & WSC_SECURITY_PROVIDER_ANTISPYWARE) {
+	if((productState >> 16) & WSC_SECURITY_PROVIDER_ANTISPYWARE) {
 		providerGuess += "AntiSpyware ";
 	}
 
-	if(provider & WSC_SECURITY_PROVIDER_INTERNET_SETTINGS) {
+	if((productState >> 16) & WSC_SECURITY_PROVIDER_INTERNET_SETTINGS) {
 		providerGuess += "InternetSettings ";
 	}
 
-	if(provider & WSC_SECURITY_PROVIDER_USER_ACCOUNT_CONTROL) {
+	if((productState >> 16) & WSC_SECURITY_PROVIDER_USER_ACCOUNT_CONTROL) {
 		providerGuess += "UAC ";
 	}
 
-	if(provider & WSC_SECURITY_PROVIDER_SERVICE) {
+	if((productState >> 16) & WSC_SECURITY_PROVIDER_SERVICE) {
 		providerGuess += "Service ";
 	}
 
-	if(provider & WSC_SECURITY_PROVIDER_NONE) {
+	if((productState >> 16) & WSC_SECURITY_PROVIDER_NONE) {
 		providerGuess += "None ";
-	}
-
-	// Something changed or we're wrong...
-	// 64 is the maximum in WSC_SECURITY_PROVIDER
-	if(provider > 64) {
-		printf("Value > 64 in WSC_SECURITY_PROVIDER guess variable.\n");
 	}
 
 	return providerGuess;
 }
 
 void WINAPI ProductStateChangeOccurred(void *param) {
-	WISKER_EVENT_DETECTION_TYPE eventType = (WISKER_EVENT_DETECTION_TYPE)(int)param;
+	WHISKER_EVENT_DETECTION_TYPE eventType = (WHISKER_EVENT_DETECTION_TYPE)(int)param;
 	char eventTypeName[32]                = {0};
 	list <struct productInfo> productList;
+	list <struct productInfo>::iterator currentProduct;
+	list <struct productChangedEvent> productEventList;
+	list<struct productInfo>::iterator cachedProduct;
+	struct productChangedEvent productEvent;
 
 	switch(eventType) {
 		case EVENT_TYPE_WSC:
@@ -161,16 +148,227 @@ void WINAPI ProductStateChangeOccurred(void *param) {
 
 	// If we're supposed to filter events, then queue the product changes
 	// for post-processing.
-	if(registeredEvents.filter) {
-		// TODO: Queue up products.
-	} else {
+	if(eventContext.processedEvents) {
+		list<struct productInfo> *eventList;
+
+		// Figure out which product changed and what changed.
+		currentProduct = productList.begin();
+
+		while(currentProduct != productList.end()) {
+			bool productFound = false;
+
+			productEvent.productInfo = *currentProduct;
+
+			// Figure out what type of product it is
+			switch(currentProduct->productType) {
+				case PRODUCT_TYPE_AV:
+					eventList = &eventContext.avList;
+					break;
+				case PRODUCT_TYPE_AS:
+					eventList = &eventContext.asList;
+					break;
+				case PRODUCT_TYPE_FW:
+					eventList = &eventContext.fwList;
+					break;
+				default:
+					printf("Bug: Unknown product type at %s:%d\n", __FUNCTION__, __LINE__);
+			};
+
+			cachedProduct = eventList->begin();
+
+			while(cachedProduct != eventList->end()) {
+				// Find the right product.
+				if(currentProduct->displayName == cachedProduct->displayName) {
+					// A little extra checking never hurt anyone
+					if(currentProduct->productType == cachedProduct->productType) {
+
+						productFound = true;
+
+						// If the product is still present, then we should mark it.
+
+						// This is for detecting new products.
+						currentProduct->productStillInstalled = true;
+
+						// This is for detecting stale products.
+						cachedProduct->productStillInstalled  = true;
+
+						if(currentProduct->productState != cachedProduct->productState) {
+							int stateChange = currentProduct->productState ^ cachedProduct->productState;
+
+							printf("Product states don't match! 0x%08X/0x%08X Delta: 0x%08X\n", 
+								currentProduct->productState, 
+								cachedProduct->productState, 
+								stateChange);
+
+							
+							if(stateChange & REAL_TIME_PROTECTION_ENABLED) {
+								if(currentProduct->productState & REAL_TIME_PROTECTION_ENABLED) {
+									productEvent.eventType = PRODUCT_REALTIME_ENABLE_EVENT;
+								} else {
+									productEvent.eventType = PRODUCT_REALTIME_DISABLE_EVENT;
+								}
+
+								productEvent.productInfo = *currentProduct;
+
+								productEventList.push_back(productEvent);
+
+								stateChange ^= REAL_TIME_PROTECTION_ENABLED;
+							}
+
+							if(stateChange & DAT_FILE_OUT_OF_DATE) {
+								if(currentProduct->productState & DAT_FILE_OUT_OF_DATE) {
+									productEvent.eventType = PRODUCT_DEFINITIONS_OUT_OF_DATE_EVENT;
+								} else {
+									productEvent.eventType = PRODUCT_DEFINITIONS_UP_TO_DATE_EVENT;
+								}
+
+								productEvent.productInfo = *currentProduct;
+
+								productEventList.push_back(productEvent);
+
+								stateChange ^= DAT_FILE_OUT_OF_DATE;
+							}
+
+							if(stateChange > 0) {
+								printf("Unaccounted for state change: 0x%08X\n", stateChange);
+							}
+
+							// Now that we've processed the changes, we can update the cached copy.
+							*cachedProduct = *currentProduct;
+						}
+
+					}
+				}
+
+				cachedProduct++;
+			}
+
+			if(productFound == false) {
+				// Looks like we found a new product!
+				printf("Found a new product!\n");
+
+				currentProduct->productStillInstalled = true;
+
+				productEvent.eventType   = PRODUCT_INSTALL_EVENT;
+
+				productEvent.productInfo = *currentProduct;
+
+				productEventList.push_back(productEvent);
+
+				// Figure out what type of product it is
+				switch(currentProduct->productType) {
+					case PRODUCT_TYPE_AV:
+						eventContext.avList.push_back(*currentProduct);
+						break;
+					case PRODUCT_TYPE_AS:
+						eventContext.asList.push_back(*currentProduct);
+						break;
+					case PRODUCT_TYPE_FW:
+						eventContext.fwList.push_back(*currentProduct);
+						break;
+					default:
+						printf("Bug: Unknown product type at %s:%d\n", __FUNCTION__, __LINE__);
+				};
+			}
+
+			currentProduct++;
+		}
+
+		// Now run through the list one more time looking for expired products
+
+		// Check AV products for expired entries.
+		cachedProduct = eventContext.avList.begin();
+
+		while(cachedProduct != eventContext.avList.end()) {
+
+			if(cachedProduct->productStillInstalled == false) {
+				printf("AV Product removed!\n");
+
+				productEvent.eventType   = PRODUCT_UNINSTALL_EVENT;
+
+				productEvent.productInfo = *cachedProduct;
+
+				productEventList.push_back(productEvent);
+
+				eventContext.avList.erase(cachedProduct++);
+			} else {
+				// Reset it for the next event.
+				cachedProduct->productStillInstalled = false;
+				cachedProduct++;
+			}
+		}
+
+		// Check AV products for expired entries.
+		cachedProduct = eventContext.asList.begin();
+
+		while(cachedProduct != eventContext.asList.end()) {
+
+			if(cachedProduct->productStillInstalled == false) {
+
+				productEvent.eventType   = PRODUCT_UNINSTALL_EVENT;
+
+				productEvent.productInfo = *cachedProduct;
+
+				productEventList.push_back(productEvent);
+
+				printf("AS Product removed!\n");
+
+				eventContext.asList.erase(cachedProduct++);
+			} else {
+				// Reset it for the next event.
+				cachedProduct->productStillInstalled = false;
+				cachedProduct++;
+			}
+		}
+
+		// Check AV products for expired entries.
+		cachedProduct = eventContext.fwList.begin();
+
+		while(cachedProduct != eventContext.fwList.end()) {
+
+			if(cachedProduct->productStillInstalled == false) {
+				printf("FW Product removed!\n");
+
+				productEvent.eventType   = PRODUCT_UNINSTALL_EVENT;
+
+				productEvent.productInfo = *cachedProduct;
+
+				productEventList.push_back(productEvent);
+
+				eventContext.fwList.erase(cachedProduct++);
+			} else {
+				// Reset it for the next event.
+				cachedProduct->productStillInstalled = false;
+				cachedProduct++;
+			}
+		}
+
+	}
+
+	if(eventContext.rawEvents) {
+		// We needed a placeholder event type so that
+		// we could deliver filterd and unfiltered
+		// events through the same callback
+		productEvent.eventType = PRODUCT_RAW_EVENT;
+
 		// Otherwise, just deliver them.
-		if(registeredEvents.EventCallback != NULL) {
-			registeredEvents.EventCallback(productList);
+		currentProduct = productList.begin();
+
+		while(currentProduct != productList.end()) {
+			productEvent.productInfo = *currentProduct;
+
+			productEventList.push_back(productEvent);
+
+			currentProduct++;
 		}
 	}
 
-	productCheckNeeded = true;
+	// Send the event list.
+	if(eventContext.EventCallback != NULL) {
+		if(productEventList.size() > 0) {
+			eventContext.EventCallback(productEventList);
+		}
+	}
 }
 
 HRESULT UnregisterProductStateChanges() {
@@ -179,7 +377,7 @@ HRESULT UnregisterProductStateChanges() {
 	if(registeredForEvents == true) {
 		hres = WscUnRegisterChanges(callbackRegistration);
 
-		memset(&registeredEvents, 0x0, sizeof(struct eventMap));
+		memset(&eventContext, 0x0, sizeof(struct eventNotificationContext));
 
 		registeredForEvents = false;
 	}
@@ -196,7 +394,7 @@ HRESULT UnregisterProductStateChanges() {
 // if product state is different, issue appropriate event(s). (tbd based on state data).
 // mark product as still present
 // at the end of all queued events iterate master list and check for non-present items... this means the product(s) in question were uninstalled.
-HRESULT RegisterProductStateChanges(void (*productStateChangeCallback)(const list<struct productInfo> &changedProducts), int registrationType) {
+HRESULT RegisterProductStateChanges(void (*productStateChangeCallback)(list<struct productChangedEvent> &changedProducts), int registrationType) {
 	HRESULT hres = S_OK;
 
 	// Register for WSC Notifications
@@ -205,19 +403,25 @@ HRESULT RegisterProductStateChanges(void (*productStateChangeCallback)(const lis
 	}
 
 	// Update the products that we want to register for:
-	registeredEvents.av       = ((registrationType & EVENT_REGISTRATION_TYPE_AV)     != 0);
-	registeredEvents.as       = ((registrationType & EVENT_REGISTRATION_TYPE_AS)     != 0);
-	registeredEvents.fw       = ((registrationType & EVENT_REGISTRATION_TYPE_FW)     != 0);
-	registeredEvents.filter   = ((registrationType & EVENT_REGISTRATION_TYPE_FILTER) != 0);
+	eventContext.av              = ((registrationType & EVENT_REGISTRATION_TYPE_AV) != 0);
+	eventContext.as              = ((registrationType & EVENT_REGISTRATION_TYPE_AS) != 0);
+	eventContext.fw              = ((registrationType & EVENT_REGISTRATION_TYPE_FW) != 0);
+	eventContext.rawEvents       = ((registrationType & EVENT_REGISTRATION_TYPE_RAW) != 0);
+	eventContext.processedEvents = ((registrationType & EVENT_REGISTRATION_TYPE_PROCESSED) != 0);
 
 	// Set up the caller's callback
-	registeredEvents.EventCallback = productStateChangeCallback;
+	eventContext.EventCallback = productStateChangeCallback;
 
 	if(registeredForEvents == true) {
 		// Just update the product type map and callback.
 
 		return S_OK;
 	}
+
+	// Prime the context with current information
+	DetectAntiVirusProducts(&eventContext.avList);
+	DetectAntiSpywareProducts(&eventContext.asList);
+	DetectFirewallProducts(&eventContext.fwList);
 
 	// We're not registered yet, so turn all the checkers on.
 	hres = WscRegisterForChanges(
@@ -284,7 +488,7 @@ HRESULT QuerySecurityCenter2Products(char *query, list<struct productInfo> *prod
         return hres;                // Program has failed.
     }
 
-    cout << "Connected to ROOT\\SECURITYCENTER2 WMI namespace" << endl;
+    //cout << "Connected to ROOT\\SECURITYCENTER2 WMI namespace" << endl;
 
 
     // Step 5: --------------------------------------------------
@@ -361,7 +565,7 @@ HRESULT QuerySecurityCenter2Products(char *query, list<struct productInfo> *prod
         VariantClear(&vtProp);
 
 		hr = pclsObj->Get(L"instanceGuid", 0, &vtProp, 0, 0);
-		wcout << "Instance GUID: " << vtProp.bstrVal << endl;
+		//wcout << "Instance GUID: " << vtProp.bstrVal << endl;
 
 		product.instanceGuid = vtProp.bstrVal;
 
@@ -369,29 +573,31 @@ HRESULT QuerySecurityCenter2Products(char *query, list<struct productInfo> *prod
 
 		hr = pclsObj->Get(L"productState", 0, &vtProp, 0, 0);
 
-		int byte4 = (vtProp.intVal & PRODUCT_STATE_BYTE4) >> 24;
-		int byte3 = (vtProp.intVal & PRODUCT_STATE_BYTE3) >> 16;
-		int byte2 = (vtProp.intVal & PRODUCT_STATE_BYTE2) >> 8;
-		int byte1 = (vtProp.intVal & PRODUCT_STATE_BYTE1);
+		int byte4 = (vtProp.intVal & 0xFF000000) >> 24;
+		int byte3 = (vtProp.intVal & 0x00FF0000) >> 16;
+		int byte2 = (vtProp.intVal & 0x0000FF00) >> 8;
+		int byte1 = (vtProp.intVal & 0x000000FF);
 
+		
 		wcout << "Product State: " << vtProp.intVal << endl;
 		wcout << "Product State (hex): " << hex << vtProp.intVal << endl;
 		wcout << "Byte 4: " << hex << byte4 << endl;
 		wcout << "Byte 3: " << hex << byte3 << endl;
 		wcout << "Byte 2: " << hex << byte2 << endl;
 		wcout << "Byte 1: " << hex << byte1 << endl;
-		wcout << "Product Guess:  " << securityProviderGuess(byte3).c_str() << endl;
-		wcout << "Realtime Guess: " << scannerActiveGuess(byte2).c_str() << endl;
-		wcout << "DAT File Guess: " << datFileGuess(byte1).c_str() << endl;
+		wcout << "Product Type:  " << securityProviderGuess(vtProp.intVal).c_str() << endl;
+		wcout << "Realtime Protection: " << scannerActiveGuess(vtProp.intVal).c_str() << endl;
+		wcout << "DAT File: " << datFileGuess(vtProp.intVal).c_str() << endl;
 		wcout << endl;
+		
 
 		product.productState = vtProp.intVal;
 
-		if(byte2 & REAL_TIME_SCAN_ENABLED) {
+		if(product.productState & REAL_TIME_PROTECTION_ENABLED) {
 			product.productEnabled = true;
 		}
 
-		if(!(byte1 & DAT_FILE_OUT_OF_DATE)) {
+		if(!(product.productState & DAT_FILE_OUT_OF_DATE)) {
 			product.productUptoDate = true;
 		}
 
@@ -463,7 +669,7 @@ HRESULT QuerySecurityCenterProducts(char *query, list<struct productInfo> *produ
         return hres;                // Program has failed.
     }
 
-    cout << "Connected to ROOT\\SECURITYCENTER WMI namespace" << endl;
+    //cout << "Connected to ROOT\\SECURITYCENTER WMI namespace" << endl;
 
 
     // Step 5: --------------------------------------------------
@@ -532,56 +738,56 @@ HRESULT QuerySecurityCenterProducts(char *query, list<struct productInfo> *produ
 
         // Get the value of the Name property
         hr = pclsObj->Get(L"displayName", 0, &vtProp, 0, 0);
-        wcout << "Product Name: " << vtProp.bstrVal << endl;
+        //wcout << "Product Name: " << vtProp.bstrVal << endl;
 
 		product.displayName = vtProp.bstrVal;
 
         VariantClear(&vtProp);
 
 		hr = pclsObj->Get(L"instanceGuid", 0, &vtProp, 0, 0);
-		wcout << "Instance GUID: " << vtProp.bstrVal << endl;
+		//wcout << "Instance GUID: " << vtProp.bstrVal << endl;
 
 		product.instanceGuid = vtProp.bstrVal;
 
 		VariantClear(&vtProp);
 
         hr = pclsObj->Get(L"companyName", 0, &vtProp, 0, 0);
-        wcout << "Company Name: " << vtProp.bstrVal << endl;
+        //wcout << "Company Name: " << vtProp.bstrVal << endl;
 
 		product.companyName = vtProp.bstrVal;
 
         VariantClear(&vtProp);
 
 		hr = pclsObj->Get(L"productEnabled", 0, &vtProp, 0, 0);
-		wcout << "Product Enabled: " << (vtProp.boolVal ? L"Yes" : L"No") << endl;
+		//wcout << "Product Enabled: " << (vtProp.boolVal ? L"Yes" : L"No") << endl;
 
 		product.productEnabled = (vtProp.boolVal != 0);
 
 		VariantClear(&vtProp);
 
 		hr = pclsObj->Get(L"productHasNotifiedUser", 0, &vtProp, 0, 0);
-		wcout << "Product Has Notified User: " << (vtProp.boolVal ? L"Yes" : L"No") << endl;
+		//wcout << "Product Has Notified User: " << (vtProp.boolVal ? L"Yes" : L"No") << endl;
 
 		product.productHasNotifiedUser = (vtProp.boolVal != 0);
 
 		VariantClear(&vtProp);
 
 		hr = pclsObj->Get(L"productUptoDate", 0, &vtProp, 0, 0);
-		wcout << "Product Up to Date: " << (vtProp.boolVal ? L"Yes" : L"No") << endl;
+		//wcout << "Product Up to Date: " << (vtProp.boolVal ? L"Yes" : L"No") << endl;
 
 		product.productUptoDate = (vtProp.boolVal != 0);
 
 		VariantClear(&vtProp);
 
 		hr = pclsObj->Get(L"productWantWscNotifications", 0, &vtProp, 0, 0);
-		wcout << "Product Wants WSC Notifications: " << (vtProp.boolVal ? L"Yes" : L"No") << endl;
+		//wcout << "Product Wants WSC Notifications: " << (vtProp.boolVal ? L"Yes" : L"No") << endl;
 
 		product.productWantsWscNotifications = (vtProp.boolVal != 0);
 
 		VariantClear(&vtProp);
 
 		hr = pclsObj->Get(L"versionNumber", 0, &vtProp, 0, 0);
-		wcout << "Version Number: " << vtProp.bstrVal << endl;
+		//wcout << "Version Number: " << vtProp.bstrVal << endl;
 
 		product.versionNumber = vtProp.bstrVal;
 
@@ -589,21 +795,23 @@ HRESULT QuerySecurityCenterProducts(char *query, list<struct productInfo> *produ
 
 		hr = pclsObj->Get(L"productState", 0, &vtProp, 0, 0);
 
-		int byte4 = (vtProp.intVal & PRODUCT_STATE_BYTE4) >> 24;
-		int byte3 = (vtProp.intVal & PRODUCT_STATE_BYTE3) >> 16;
-		int byte2 = (vtProp.intVal & PRODUCT_STATE_BYTE2) >> 8;
-		int byte1 = (vtProp.intVal & PRODUCT_STATE_BYTE1);
+		int byte4 = (vtProp.intVal & 0xFF000000) >> 24;
+		int byte3 = (vtProp.intVal & 0x00FF0000) >> 16;
+		int byte2 = (vtProp.intVal & 0x0000FF00) >> 8;
+		int byte1 = (vtProp.intVal & 0x000000FF);
 
+		/*
 		wcout << "Product State: " << vtProp.intVal << endl;
 		wcout << "Product State (hex): " << hex << vtProp.intVal << endl;
 		wcout << "Byte 4: " << hex << byte4 << endl;
 		wcout << "Byte 3: " << hex << byte3 << endl;
 		wcout << "Byte 2: " << hex << byte2 << endl;
 		wcout << "Byte 1: " << hex << byte1 << endl;
-		wcout << "Product Guess:  " << securityProviderGuess(byte3).c_str() << endl;
-		wcout << "Realtime Guess: " << scannerActiveGuess(byte2).c_str() << endl;
-		wcout << "DAT File Guess: " << datFileGuess(byte1).c_str() << endl;
+		wcout << "Product Guess:  " << securityProviderGuess(vtProp.intVal).c_str() << endl;
+		wcout << "Realtime Guess: " << scannerActiveGuess(vtProp.intVal).c_str() << endl;
+		wcout << "DAT File Guess: " << datFileGuess(vtProp.intVal).c_str() << endl;
 		wcout << endl;
+		*/
 
 		product.productState = vtProp.intVal;
 
@@ -645,10 +853,19 @@ HRESULT QueryOtherFirewallProducts(list<struct productInfo> *productList) {
 	product.productEnabled = (fwState != 0);
 	product.productType = PRODUCT_TYPE_FW;
 
-	printf("Other Firewall Products: \n\n");
+	// Set the product state.
+	// This is crucial for events to work properly.
+	product.productState = WSC_SECURITY_PROVIDER_FIREWALL << 16;
 
-	printf("Product Name: Windows Firewall\n");
-	printf("Realtime Status: %s\n\n", (fwState == TRUE)? "Enabled" : "Disabled");
+	if(product.productEnabled) {
+		product.productEnabled = true;
+		product.productState += REAL_TIME_PROTECTION_ENABLED;
+	}
+
+	//printf("Other Firewall Products: \n\n");
+
+	//printf("Product Name: Windows Firewall\n");
+	//printf("Realtime Protection: %s\n\n", (fwState == TRUE)? "Enabled" : "Disabled");
 
 	productList->push_back(product);
 
@@ -659,7 +876,7 @@ HRESULT DetectAntiVirusProducts(list<struct productInfo> *avList) {
 	HRESULT result = S_OK;
 	char *query = "SELECT * from AntiVirusProduct";
 
-	printf("----- Query: %s -----\n", query);
+	//printf("----- Query: %s -----\n", query);
 
 	// Get products for ROOT\\SECURITYCENTER2 namespace
 	result = QuerySecurityCenter2Products(query, avList, PRODUCT_TYPE_AV);
@@ -667,7 +884,7 @@ HRESULT DetectAntiVirusProducts(list<struct productInfo> *avList) {
 	// Get products for ROOT\\SECURITYCENTER namespace
 	result = QuerySecurityCenterProducts(query, avList, PRODUCT_TYPE_AV);
 
-	printf("----- End Query: %s -----\n\n", query);
+	//printf("----- End Query: %s -----\n\n", query);
 
 	// TODO: Any that don't show up?
 	return result;
@@ -677,7 +894,7 @@ HRESULT DetectAntiVirusProducts(list<struct productInfo> *avList) {
 	HRESULT result = S_OK;
 	char *query = "SELECT * from AntiSpywareProduct";
 
-	printf("----- Query: %s -----\n", query);
+	//printf("----- Query: %s -----\n", query);
 
 	// Get products for ROOT\\SECURITYCENTER2 namespace
 	result = QuerySecurityCenter2Products(query, asList, PRODUCT_TYPE_AS);
@@ -685,7 +902,7 @@ HRESULT DetectAntiVirusProducts(list<struct productInfo> *avList) {
 	// Get products for ROOT\\SECURITYCENTER namespace
 	result = QuerySecurityCenterProducts(query, asList, PRODUCT_TYPE_AS);
 
-	printf("----- End Query: %s -----\n\n", query);
+	//printf("----- End Query: %s -----\n\n", query);
 
 	// TODO: Windows Defender?
 	return result;
@@ -695,7 +912,7 @@ HRESULT DetectFirewallProducts(list<struct productInfo> *fwList) {
 	HRESULT result = S_OK;
 	char *query = "SELECT * from FirewallProduct";
 
-	printf("----- Query: %s -----\n", query);
+	//printf("----- Query: %s -----\n", query);
 
 	// Get products for ROOT\\SECURITYCENTER2 namespace
 	result = QuerySecurityCenter2Products(query, fwList, PRODUCT_TYPE_FW);
@@ -703,7 +920,7 @@ HRESULT DetectFirewallProducts(list<struct productInfo> *fwList) {
 	// Get products for ROOT\\SECURITYCENTER namespace
 	result = QuerySecurityCenterProducts(query, fwList, PRODUCT_TYPE_FW);
 
-	printf("----- End Query: %s -----\n\n", query);
+	//printf("----- End Query: %s -----\n\n", query);
 
 	// TODO: Windows Firewall?
 	result = QueryOtherFirewallProducts(fwList);

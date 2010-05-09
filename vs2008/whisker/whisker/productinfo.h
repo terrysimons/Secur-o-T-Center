@@ -41,6 +41,9 @@ typedef struct productInfo {
 	// all seem to use the productState fields differently
 	// and incorrectly.
 	enum WHISKER_PRODUCT_TYPE productType;
+
+	// Use to age out uninstalled products
+	bool productStillInstalled;
 }productInfo;
 
 #endif // __PRODUCT_INFO_H__

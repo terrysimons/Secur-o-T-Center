@@ -5,8 +5,9 @@
 #include "eventdetection.h"
 #include "productinfo.h"
 
-bool done               = false;
 using namespace std;
+
+bool done = false;
 
 list <struct productInfo> avList;
 list <struct productInfo> asList;
@@ -30,8 +31,41 @@ BOOL WINAPI ConsoleHandler(DWORD CEvent) {
 	return TRUE;
 }
 
-void EventNotificationCallback(const list<struct productInfo> &changedProducts) {
-	printf("Main!\n");
+void EventNotificationCallback(list<struct productChangedEvent> &changedProducts) {
+	list<struct productChangedEvent>::iterator currentEvent;
+
+	currentEvent = changedProducts.begin();
+
+	while(currentEvent != changedProducts.end()) {
+
+		switch(currentEvent->eventType) {
+			case PRODUCT_RAW_EVENT:
+				// Throw away raw events.
+				break;
+			case PRODUCT_INSTALL_EVENT:
+				printf("Product Install Event\n");
+				break;
+			case PRODUCT_UNINSTALL_EVENT:
+				printf("Product Uninstall Event\n");
+				break;
+			case PRODUCT_REALTIME_ENABLE_EVENT:
+				printf("Product Realtime Enable Event\n");
+				break;
+			case PRODUCT_REALTIME_DISABLE_EVENT:
+				printf("Product Realtime Disable Event\n");
+				break;
+			case PRODUCT_DEFINITIONS_UP_TO_DATE_EVENT:
+				printf("Product Definitions Are Current Event\n");
+				break;
+			case PRODUCT_DEFINITIONS_OUT_OF_DATE_EVENT:
+				printf("Product Definitions Are Out of Date Event\n");
+				break;
+			default:
+				printf("Unknown Event Type: %d\n", currentEvent->eventType);
+		};
+
+		currentEvent++;
+	}
 }
 
 int main(int argc, char **argv) {
@@ -83,7 +117,7 @@ int main(int argc, char **argv) {
 	// This will ensure that we only get notified of hard changes.
 	// It prevents blipping that can occur during installation/removal of products.
 	RegisterProductStateChanges(&EventNotificationCallback, 
-								EVENT_REGISTRATION_TYPE_ALL|EVENT_REGISTRATION_TYPE_FILTER);
+								EVENT_REGISTRATION_TYPE_ALL);
 
 	DetectAntiVirusProducts(&avList);
 	DetectAntiSpywareProducts(&asList);
