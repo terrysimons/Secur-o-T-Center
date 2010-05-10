@@ -29,6 +29,7 @@ typedef struct productInfo {
 	bool productWantsWscNotifications;
 	wstring versionNumber;
 	int productState;
+	int legacyProductState;
 
 	// Non-WMI information
 

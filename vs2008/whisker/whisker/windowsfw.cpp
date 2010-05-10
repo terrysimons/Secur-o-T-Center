@@ -147,11 +147,11 @@ HRESULT GetWindowsFirewallState(BOOL *fwOn) {
 }
 
 unsigned __stdcall PollWindowsFirewallState(void* arg) {
-  HANDLE timer             = (HANDLE)arg;
-  BOOL newState            = FALSE;
+  HANDLE timer  = (HANDLE)arg;
+  BOOL newState = FALSE;
 
   while (1) {
-    WaitForSingleObject(timer,INFINITE);
+    WaitForSingleObject(timer, INFINITE);
 
 	GetWindowsFirewallState(&newState);
 

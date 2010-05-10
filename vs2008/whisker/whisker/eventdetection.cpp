@@ -3,9 +3,10 @@
 #include <iostream>
 #include <comdef.h>
 #include <Wbemidl.h>
+#include <Wscapi.h>
 #include <netfw.h>
 #include <windows.h>
-#include <Wscapi.h>
+#include <process.h>
 #include <stdio.h>
 #include <list>
 #include "productinfo.h"
@@ -15,10 +16,9 @@ using namespace std;
 
 #pragma comment(lib, "wbemuuid.lib")
 
-
-/*#define PRODUCT_CODE_SECURITY_PROVIDER 0x00FF
-#define PRODUCT_CODE_SCANNER_SETTINGS 0x0000FF
-#define PRODUCT_CODE_DAT_FILE_UPDATED 0x000000FF*/
+#ifdef VISTA
+#pragma comment(lib, "Wscapi.lib")
+#endif // VISTA
 
 #define REAL_TIME_PROTECTION_ENABLED 0x00001000
 #define DAT_FILE_OUT_OF_DATE 0x00000010
@@ -80,7 +80,6 @@ string scannerActiveGuess(int productState) {
 
 string securityProviderGuess(int productState) {
 string providerGuess;
-
 	if((productState >> 16) & WSC_SECURITY_PROVIDER_FIREWALL) {
 		providerGuess += "Firewall ";
 	}
@@ -112,7 +111,6 @@ string providerGuess;
 	if((productState >> 16) & WSC_SECURITY_PROVIDER_NONE) {
 		providerGuess += "None ";
 	}
-
 	return providerGuess;
 }
 
@@ -128,6 +126,9 @@ void WINAPI ProductStateChangeOccurred(void *param) {
 	switch(eventType) {
 		case EVENT_TYPE_WSC:
 			strncpy_s(eventTypeName, "WSC", sizeof(eventTypeName) - 1);
+			break;
+		case EVENT_TYPE_LEGACY_WSC:
+			strncpy_s(eventTypeName, "Legacy WSC", sizeof(eventTypeName) - 1);
 			break;
 		case EVENT_TYPE_MSFW:
 			strncpy_s(eventTypeName, "MS Firewall", sizeof(eventTypeName) - 1);
@@ -191,6 +192,18 @@ void WINAPI ProductStateChangeOccurred(void *param) {
 
 						// This is for detecting stale products.
 						cachedProduct->productStillInstalled  = true;
+
+						// Check the legacy product states
+						if(currentProduct->legacyProductState != cachedProduct->legacyProductState) {
+							int stateChange = currentProduct->legacyProductState ^ cachedProduct->legacyProductState;
+
+							printf("Legacy product states don't match! 0x%08X/0x%08X Delta: 0x%08X\n", 
+								currentProduct->legacyProductState, 
+								cachedProduct->legacyProductState, 
+								stateChange);
+
+							cachedProduct->legacyProductState = currentProduct->legacyProductState;
+						}
 
 						if(currentProduct->productState != cachedProduct->productState) {
 							int stateChange = currentProduct->productState ^ cachedProduct->productState;
@@ -375,7 +388,9 @@ HRESULT UnregisterProductStateChanges() {
 	HRESULT hres = S_OK;
 
 	if(registeredForEvents == true) {
+#ifdef VISTA
 		hres = WscUnRegisterChanges(callbackRegistration);
+#endif // VISTA
 
 		memset(&eventContext, 0x0, sizeof(struct eventNotificationContext));
 
@@ -383,6 +398,37 @@ HRESULT UnregisterProductStateChanges() {
 	}
 
 	return hres;
+}
+
+// For now this is a super cheap way to get events on XP
+unsigned __stdcall PollLegacyWscState(void *arg) {
+  HANDLE timer  = (HANDLE)arg;
+  BOOL newState = FALSE;
+
+  while (1) {
+    WaitForSingleObject(timer, INFINITE);
+
+	if(windowsFirewallRealtimeState != newState) {
+
+		ProductStateChangeOccurred((void *)EVENT_TYPE_LEGACY_WSC);
+
+		windowsFirewallRealtimeState = newState;
+	}
+  }
+}
+
+void RegisterLegacyWscChanges() {
+	HANDLE timer = NULL;
+
+	timer = CreateWaitableTimer(0, false, 0);
+	LARGE_INTEGER li;
+	const int unitsPerSecond = 10 * 1000 * 1000;
+
+	li.QuadPart=-(5*unitsPerSecond);
+
+	SetWaitableTimer(timer, &li, 5000, 0, 0, false);
+
+	_beginthreadex(0, 0, PollLegacyWscState, (void *)timer, 0, 0);
 }
 
 // detect product change
@@ -424,11 +470,17 @@ HRESULT RegisterProductStateChanges(void (*productStateChangeCallback)(list<stru
 	DetectFirewallProducts(&eventContext.fwList);
 
 	// We're not registered yet, so turn all the checkers on.
+#ifdef VISTA
 	hres = WscRegisterForChanges(
 		NULL, 
 		&callbackRegistration, 
 		(LPTHREAD_START_ROUTINE)ProductStateChangeOccurred, 
 		(PVOID)EVENT_TYPE_WSC);
+#else
+
+	RegisterLegacyWscChanges();
+
+#endif // VISTA
 
 	// Now setup non-wsc product detection
 	// MS Firewall
@@ -482,8 +534,8 @@ HRESULT QuerySecurityCenter2Products(char *query, list<struct productInfo> *prod
     
     if (FAILED(hres))
     {
-        cout << "Could not connect to ROOT\\SECURITYCENTER2. Error code = 0x" 
-             << hex << hres << endl;
+        //cout << "Could not connect to ROOT\\SECURITYCENTER2. Error code = 0x" 
+        //     << hex << hres << endl;
         pLoc->Release();     
         return hres;                // Program has failed.
     }
@@ -738,7 +790,7 @@ HRESULT QuerySecurityCenterProducts(char *query, list<struct productInfo> *produ
 
         // Get the value of the Name property
         hr = pclsObj->Get(L"displayName", 0, &vtProp, 0, 0);
-        //wcout << "Product Name: " << vtProp.bstrVal << endl;
+        wcout << "Product Name: " << vtProp.bstrVal << endl;
 
 		product.displayName = vtProp.bstrVal;
 
@@ -752,42 +804,42 @@ HRESULT QuerySecurityCenterProducts(char *query, list<struct productInfo> *produ
 		VariantClear(&vtProp);
 
         hr = pclsObj->Get(L"companyName", 0, &vtProp, 0, 0);
-        //wcout << "Company Name: " << vtProp.bstrVal << endl;
+        wcout << "Company Name: " << vtProp.bstrVal << endl;
 
 		product.companyName = vtProp.bstrVal;
 
         VariantClear(&vtProp);
 
 		hr = pclsObj->Get(L"productEnabled", 0, &vtProp, 0, 0);
-		//wcout << "Product Enabled: " << (vtProp.boolVal ? L"Yes" : L"No") << endl;
+		wcout << "Product Enabled: " << (vtProp.boolVal ? L"Yes" : L"No") << endl;
 
 		product.productEnabled = (vtProp.boolVal != 0);
 
 		VariantClear(&vtProp);
 
 		hr = pclsObj->Get(L"productHasNotifiedUser", 0, &vtProp, 0, 0);
-		//wcout << "Product Has Notified User: " << (vtProp.boolVal ? L"Yes" : L"No") << endl;
+		wcout << "Product Has Notified User: " << (vtProp.boolVal ? L"Yes" : L"No") << endl;
 
 		product.productHasNotifiedUser = (vtProp.boolVal != 0);
 
 		VariantClear(&vtProp);
 
 		hr = pclsObj->Get(L"productUptoDate", 0, &vtProp, 0, 0);
-		//wcout << "Product Up to Date: " << (vtProp.boolVal ? L"Yes" : L"No") << endl;
+		wcout << "Product Up to Date: " << (vtProp.boolVal ? L"Yes" : L"No") << endl;
 
 		product.productUptoDate = (vtProp.boolVal != 0);
 
 		VariantClear(&vtProp);
 
 		hr = pclsObj->Get(L"productWantWscNotifications", 0, &vtProp, 0, 0);
-		//wcout << "Product Wants WSC Notifications: " << (vtProp.boolVal ? L"Yes" : L"No") << endl;
+		wcout << "Product Wants WSC Notifications: " << (vtProp.boolVal ? L"Yes" : L"No") << endl;
 
 		product.productWantsWscNotifications = (vtProp.boolVal != 0);
 
 		VariantClear(&vtProp);
 
 		hr = pclsObj->Get(L"versionNumber", 0, &vtProp, 0, 0);
-		//wcout << "Version Number: " << vtProp.bstrVal << endl;
+		wcout << "Version Number: " << vtProp.bstrVal << endl;
 
 		product.versionNumber = vtProp.bstrVal;
 
@@ -800,24 +852,62 @@ HRESULT QuerySecurityCenterProducts(char *query, list<struct productInfo> *produ
 		int byte2 = (vtProp.intVal & 0x0000FF00) >> 8;
 		int byte1 = (vtProp.intVal & 0x000000FF);
 
+		wcout << "Legacy WSC State" << endl;
 		wcout << "Product State: " << dec << vtProp.intVal << endl;
 		wcout << "Product State (hex): " << hex << vtProp.intVal << endl;
 		wcout << "Byte 4: " << hex << byte4 << endl;
 		wcout << "Byte 3: " << hex << byte3 << endl;
 		wcout << "Byte 2: " << hex << byte2 << endl;
 		wcout << "Byte 1: " << hex << byte1 << endl;
-		wcout << "Product Guess:  " << securityProviderGuess(vtProp.intVal).c_str() << endl;
-		wcout << "Realtime Guess: " << scannerActiveGuess(vtProp.intVal).c_str() << endl;
-		wcout << "DAT File Guess: " << datFileGuess(vtProp.intVal).c_str() << endl;
-		wcout << endl;
+		wcout << "Product Type (Legacy):  " << securityProviderGuess(vtProp.intVal).c_str() << endl;
+		wcout << "Realtime Protection (Legacy): " << scannerActiveGuess(vtProp.intVal).c_str() << endl;
+		wcout << "DAT File (Legacy): " << datFileGuess(vtProp.intVal).c_str() << endl;
 
-		product.productState = vtProp.intVal;
+		product.legacyProductState = vtProp.intVal;
 
 		product.productType = productType;
 
 		productList->push_back(product);
 
 		VariantClear(&vtProp);
+
+		// Hack together a product state that is compatible with newer WSC:
+		switch(product.productType) {
+			case PRODUCT_TYPE_AV:
+				product.productState = WSC_SECURITY_PROVIDER_ANTIVIRUS << 16;
+				break;
+			case PRODUCT_TYPE_AS:
+				product.productState = WSC_SECURITY_PROVIDER_ANTISPYWARE << 16;
+				break;
+			case PRODUCT_TYPE_FW:
+				product.productState = WSC_SECURITY_PROVIDER_FIREWALL << 16;
+				break;
+		};
+
+		if(product.productEnabled) {
+			product.productState += REAL_TIME_PROTECTION_ENABLED;
+		}
+
+		if(product.productUptoDate == false) {
+			product.productState += DAT_FILE_OUT_OF_DATE;
+
+		}
+
+		byte4 = (product.productState & 0xFF000000) >> 24;
+		byte3 = (product.productState & 0x00FF0000) >> 16;
+		byte2 = (product.productState & 0x0000FF00) >> 8;
+		byte1 = (product.productState & 0x000000FF);
+
+		wcout << "New WSC State" << endl;
+		wcout << "Product State: " << dec << product.productState << endl;
+		wcout << "Product State (hex): " << hex << product.productState << endl;
+		wcout << "Byte 4: " << hex << byte4 << endl;
+		wcout << "Byte 3: " << hex << byte3 << endl;
+		wcout << "Byte 2: " << hex << byte2 << endl;
+		wcout << "Byte 1: " << hex << byte1 << endl;
+		wcout << "Product Type:  " << securityProviderGuess(product.productState).c_str() << endl;
+		wcout << "Realtime Protection: " << scannerActiveGuess(product.productState).c_str() << endl;
+		wcout << "DAT File: " << datFileGuess(product.productState).c_str() << endl;
 
         pclsObj->Release();
     }
